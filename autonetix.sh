@@ -129,26 +129,35 @@ formatted_domains=$(echo "$domains_input" | sed 's/ *, */,/g')
 # Split comma-separated domains and store them in an array
 IFS=',' read -ra domains <<< "$formatted_domains"
 
+# Combine user-provided domains with subdomains
+combined_domains=()
+
 # Iterate over each domain to enumerate subdomains and create scan targets
 for domain in "${domains[@]}"; do
   # Use sublist3r to enumerate subdomains and store only the subdomain names in a variable
-  subdomains_sublist=$(sublist3r -d $domain -n | awk '/[a-zA-Z0-9]+\.'$domain'/{print $1}')
+  subdomains_sublist=$(sublist3r -d $domain -n | awk '/[a-zA-Z0-9]+\.'$domain'/{print $1}' | sort -u)
 
-  # Use aquatone-discover to enumerate subdomains and store only the subdomain names in a variable
-  subdomains_aquatone=$(aquatone-discover -d $domain -t 25 | grep -oP '([a-zA-Z0-9._-]+\.)+[a-zA-Z]{2,}' | grep -v -E '(png|jpg|jpeg|gif|txt|json)$' | grep -v 'google.com' | sed 's/^1m//' | sort -u)
+  # Use subfinder to enumerate subdomains and store only the subdomain names in a variable, suppressing stderr output
+  subdomains_subfinder=$(subfinder -d $domain -silent 2>/dev/null | grep -oP '([a-zA-Z0-9._-]+\.)+[a-zA-Z]{2,}' | sort -u)
 
-  # Combine and store the unique subdomains from both tools
-  unique_subdomains=$(echo -e "$subdomains_aquatone\n$subdomains_sublist" | sort -u)
+  # Combine and store the unique subdomains from both tools, including the original domain
+  unique_subdomains=$(echo -e "$domain\n$subdomains_subfinder\n$subdomains_sublist" | sort -u | uniq)
+  
+  # Add unique subdomains to combined_domains
+  combined_domains+=($unique_subdomains)
 
   # Print the found subdomains to the screen
   echo "Subdomains found for $domain:"
   echo "$unique_subdomains"
+done
 
-  # Add subdomains as scan targets
-  for subdomain in $unique_subdomains; do
-    MyTargetID=$(curl -sS -k -X POST "$MyAXURL/targets" -H "Content-Type: application/json" -H "X-Auth: $MyAPIKEY" --data "{\"address\":\"$subdomain\",\"description\":\"Subdomain of $domain\",\"type\":\"default\",\"criticality\":10}" | jq -r '.target_id')
-    MyTargetIDs+=("$MyTargetID")
-  done
+# Remove duplicates from combined_domains array
+combined_domains=($(echo "${combined_domains[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+
+# Add subdomains as scan targets
+for subdomain in "${combined_domains[@]}"; do
+  MyTargetID=$(curl -sS -k -X POST "$MyAXURL/targets" -H "Content-Type: application/json" -H "X-Auth: $MyAPIKEY" --data "{\"address\":\"$subdomain\",\"description\":\"Subdomain of $subdomain\",\"type\":\"default\",\"criticality\":10}" | jq -r '.target_id')
+  MyTargetIDs+=("$MyTargetID")
 done
 
 # Start scans for each scan target
