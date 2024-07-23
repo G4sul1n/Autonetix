@@ -171,18 +171,21 @@ for id in "${MyScanIDs[@]}"; do
   while true; do
     MyScanStatus=$(curl -sS -k -X GET "$MyAXURL/scans/$id" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY")
 
-    if [[ "$MyScanStatus" == *"\"status\": \"processing\""* ]]; then
+    scan_status=$(echo "$MyScanStatus" | jq -r '.current_session.status')
+    if [[ "$scan_status" == "processing" ]]; then
       echo "Scan status: Processing - waiting 30 seconds"
-    elif [[ "$MyScanStatus" == *"\"status\": \"scheduled\""* ]]; then
+    elif [[ "$scan_status" == "scheduled" ]]; then
       echo "Scan status: Scheduled - waiting 30 seconds"
-    elif [[ "$MyScanStatus" == *"\"status\": \"completed\""* ]]; then
+    elif [[ "$scan_status" == "completed" ]]; then
       echo "Scan status: Completed"
       # Get scan result ID
       MyScanResultID=$(echo "$MyScanStatus" | jq -r '.current_session_id')
       # Exit the loop
       break
+    elif [[ "$scan_status" == "queued" ]]; then
+      echo "Scan status: Queued - waiting 30 seconds"
     else
-      echo "Invalid scan status: Aborting"
+      echo "Invalid scan status for scan ID: $id. Response: $MyScanStatus"
       # Cleanup and exit the script
       cleanup
       exit 1
