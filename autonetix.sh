@@ -50,6 +50,15 @@ cleanup(){
     done
 }
 
+abort_scans(){
+    echo "Aborting all scans..."
+    for id in "${MyScanIDs[@]}"; do
+        curl -sS -k -X POST "$MyAXURL/scans/$id/abort" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY" > /dev/null
+    done
+    cleanup
+    exit 1
+}
+
 obtain_and_display_vulnerabilities(){
     # Ensure we have a valid scan result ID before proceeding
     for id in "${MyScanIDs[@]}"; do
@@ -100,6 +109,9 @@ display_vulnerabilities(){
 
 # Display the banner
 display_banner
+
+# Handle user interruption (CTRL + C)
+trap abort_scans INT
 
 # Process command-line arguments manually
 for arg in "$@"; do
@@ -184,11 +196,18 @@ for id in "${MyScanIDs[@]}"; do
       break
     elif [[ "$scan_status" == "queued" ]]; then
       echo "Scan status: Queued - waiting 30 seconds"
+    elif [[ "$scan_status" == "failed" ]]; then
+      echo "Scan status: Failed for scan ID: $id"
+      # Log and continue with the next scan
+      break
+    elif [[ "$scan_status" == "aborted" ]]; then
+      echo "Scan status: Aborted for scan ID: $id"
+      # Log and continue with the next scan
+      break
     else
       echo "Invalid scan status for scan ID: $id. Response: $MyScanStatus"
-      # Cleanup and exit the script
-      cleanup
-      exit 1
+      # Log and continue with the next scan
+      break
     fi
     sleep 30
   done
@@ -196,3 +215,4 @@ done
 
 # Final cleanup
 cleanup
+
