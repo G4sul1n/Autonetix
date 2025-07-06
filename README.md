@@ -2,7 +2,7 @@
 
 AUTONETIX is a tool designed for subdomain enumeration using Sublist3r and Subfinder and subsequent vulnerability scanning using the Acunetix API. This script is designed to provide results on the vulnerabilities contained in the subdomains of each of the domains provided to the tool without the need for user intervention. Possible uses in Bug Bounty, CVE discovery and mass vulnerability scanning.
 
-For each of the domains provided, subdomains will be listed using the tools specified above and only the unique domains found will be scanned by Acunetix. The status of the scan will be checked every 30 seconds and reported on the terminal. Finally, when finished, all vulnerabilities found will be printed on the terminal in order of criticality and the scans will be removed from acunetix to avoid the accumulation of scans in the program.
+For each of the domains provided, subdomains will be listed using the tools specified above and only the unique domains found will be scanned by Acunetix using the selected scan speed. The status of the scan will be checked every 30 seconds and reported on the terminal. Finally, when finished, all vulnerabilities found will be printed on the terminal in order of criticality and the scans will be removed from acunetix if selected to avoid the accumulation of scans in the program. The results will also be saved in a .txt file named by the user if required.
 
 PS: Make sure that a valid Acunetix API is entered in the code and verify that the specified URL corresponds to your Acunetix installation.
 
@@ -47,5 +47,7 @@ chmod +x autonetix.sh
 ```
 PS: Please note that subdomain discovery may take some time. Do not alarm if you don't see results in your screen inmediately.
 ## Screenshots
-![autonetix example](https://github.com/user-attachments/assets/4c6aa6cf-eb64-4635-a2b3-32b1344f7e9d)
-![autonetix result](https://github.com/user-attachments/assets/4730ead7-5f9c-4528-9c22-0a2118a9fffc)
+![autonetix example](https://github.com/user-attachments/assets/9db279e8-3c71-4224-b88b-a5ccc82c4b1d)
+![autonetix result](https://github.com/user-attachments/assets/0c6bfdf7-f853-4c38-a84b-319a6c5dcefa)
+
+
