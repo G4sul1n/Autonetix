@@ -43,7 +43,7 @@ chmod +x autonetix.sh
 3. Verify that the specified URL in the code corresponds to your Acunetix installation.
 4. Run the script:
 ```shell
-./autonetix.sh -d domain1.com, domain2.com, domain3.com...
+./autonetix.sh -d domain1.com, domain2.com -t [1-4] -c -o results.txt
 ```
 PS: Please note that subdomain discovery may take some time. Do not alarm if you don't see results in your screen inmediately.
 ## Screenshots
