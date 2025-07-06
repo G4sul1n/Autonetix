@@ -1,218 +1,216 @@
 #!/bin/bash
+#
+#  Autonetix – Sub-domain Enumeration + Acunetix Scanning
+#
+#  CLI
+#  ──────────────────────────────────────────────────────────
+#   -d <domains>    Comma-separated main domains (spaces allowed)
+#   -t 1-4        Speed: 1 sequential · 2 slow · 3 moderate · 4 fast (default)
+#   -c            Delete scans & targets on exit / CTRL-C
+#   -o <file>     Export findings to <file>.txt
+#   -h            Show help
+#
+#  What it does
+#  ──────────────────────────────────────────────────────────
+#   • Sub-domain discovery (Sublist3r + Subfinder).
+#   • One Acunetix target per host.
+#   • Chooses scan speed, launches Full Scans, polls every 30 s.
+#   • Shows a vulnerability table sorted by criticality (critical → info),
+#   • Optionally exports the same table to TXT.
+#   • Cleans up only if the –c flag is present.
+#
+###################################################################
 
-# Declare variables
-# Modify next line if necessary
-MyAXURL="https://localhost:3443/api/v1"
-# Add your API key in the next line
-MyAPIKEY=""
-FullScanProfileID="11111111-1111-1111-1111-111111111111"
+############################
+# Static configuration     #
+############################
+AX_URL="https://localhost:3443/api/v1"
+AX_KEY="" # Add your API KEY here
+FULL_SCAN_PROFILE="11111111-1111-1111-1111-111111111111"
 
-# Arrays to store target and scan IDs
-MyTargetIDs=()
-MyScanIDs=()
-MyScanVulnerabilities=""
+############################
+# Runtime variables        #
+############################
+SPEED_OPT=4
+SCAN_SPEED="fast"
+DO_CLEANUP=0
+OUTPUT_FILE=""
 
-# Functions
-display_banner() {
-    echo "____________  ____________________   ____________________________  __"
-    echo "___    |_  / / /__  __/_  __ \__  | / /__  ____/__  __/___  _/_  |/ /"
-    echo "__  /| |  / / /__  /  _  / / /_   |/ /__  __/  __  /   __  / __    / "
-    echo "_  ___ / /_/ / _  /   / /_/ /_  /|  / _  /___  _  /   __/ /  _    |  "
-    echo "/_/  |_\____/  /_/    \____/ /_/ |_/  /_____/  /_/    /___/  /_/|_|  "
-    echo "                                                                     "
-    echo "                   Created by g4su"
-    echo ""
-}
+TARGET_IDS=()
+SCAN_IDS=()
+SCAN_VULNS=""
+declare -A SUB_ROOT
+
+############################
+# Helper functions         #
+############################
+banner() { cat <<'EOF'
+____________  ____________________   ____________________________  __
+___    |_  / / /__  __/_  __ \__  | / /__  ____/__  __/___  _/_  |/ /
+__  /| |  / / /__  /  _  / / /_   |/ /__  __/  __  /   __  / __    /
+_  ___ / /_/ / _  /   / /_/ /_  /|  / _  /___  _  /   __/ /  _    |
+/_/  |_\____/  /_/    \____/ /_/ |_/  /_____/  /_/    /___/  /_/|_|
+                                                                   
+                   Created by g4su
+EOF
+echo; }
 
 usage() {
-    echo "Usage: $0 -d <domain1.com>,<domain2.com>,..."
-    echo "       $0 -d domain1.com, domain2.com, domain3.com"
-    echo "       $0 -h"
-    echo ""
-    echo "Options:"
-    echo "  -d   Comma-separated list of domains to enumerate and scan"
-    echo "  -h   Show this help message"
-    exit 1
+  echo "Usage: $0 -d <domain[, domain2, ...]> [-t 1-4] [-c] [-o name[.txt]]"
+  echo
+  echo "  -d   Main domains (spaces after commas are fine)"
+  echo "  -t   Speed: 1 sequential | 2 slow | 3 moderate | 4 fast (default)"
+  echo "  -c   Delete scans & targets on exit / CTRL-C"
+  echo "  -o   Export findings to TXT (extension auto-added if missing)"
+  echo "  -h   Show this help"
+  exit 1
 }
 
-cleanup(){
-    # Try to obtain and display vulnerabilities even if the scan is aborted
-    obtain_and_display_vulnerabilities
-
-    # Delete scans
-    for id in "${MyScanIDs[@]}"; do
-        curl -sS -k -X DELETE "$MyAXURL/scans/$id" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY" > /dev/null
-    done
-
-    # Delete targets
-    for id in "${MyTargetIDs[@]}"; do
-        curl -sS -k -X DELETE "$MyAXURL/targets/$id" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY" > /dev/null
-    done
+#####################################
+# Clean-up (only if –c)             #
+#####################################
+cleanup() {
+  collect_and_print_vulns
+  (( DO_CLEANUP )) || return
+  for id in "${SCAN_IDS[@]}";   do curl -sSk -X DELETE "$AX_URL/scans/$id"   -H "X-Auth: $AX_KEY" >/dev/null; done
+  for id in "${TARGET_IDS[@]}"; do curl -sSk -X DELETE "$AX_URL/targets/$id" -H "X-Auth: $AX_KEY" >/dev/null; done
 }
 
-abort_scans(){
-    echo "Aborting all scans..."
-    for id in "${MyScanIDs[@]}"; do
-        curl -sS -k -X POST "$MyAXURL/scans/$id/abort" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY" > /dev/null
-    done
-    cleanup
-    exit 1
+abort_handler() {
+  echo "Aborting all scans..."
+  for id in "${SCAN_IDS[@]}"; do
+      curl -sSk -X POST "$AX_URL/scans/$id/abort" -H "X-Auth: $AX_KEY" >/dev/null
+  done
+  cleanup
+  exit 1
 }
 
-obtain_and_display_vulnerabilities(){
-    # Ensure we have a valid scan result ID before proceeding
-    for id in "${MyScanIDs[@]}"; do
-        MyScanResultID=$(curl -sS -k -X GET "$MyAXURL/scans/$id/results" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY" | jq -r '.results[0].result_id')
-        if [[ -n "$MyScanResultID" && "$MyScanResultID" != "null" ]]; then
-            # Obtain vulnerabilities
-            MyScanVulnerabilities+=$(curl -sS -k -X GET "$MyAXURL/scans/$id/results/$MyScanResultID/vulnerabilities" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY")
-        else
-            echo "Failed to obtain a valid scan result ID for scan ID: $id."
-        fi
-    done
+#####################################
+# Vulnerability reporting           #
+#####################################
+sev_txt(){ case $1 in 4)echo critical;;3)echo high;;2)echo medium;;1)echo low;;0)echo informational;;*)echo unknown;;esac; }
 
-    # Display vulnerabilities
-    display_vulnerabilities
+print_vulns_table() {
+  echo; echo "Scan Vulnerabilities (sorted by severity)"; echo "========================================="; echo
+  GREEN='\033[0;32m'; NC='\033[0m'
+  printf "${GREEN}%-65s %-16s  %-12s %-50s${NC}\n" "Affected URL" "Severity" "Confidence" "Vulnerability Name"
+
+  # Convert to TSV → sort by severity numeric (field #2) desc → pretty print
+  echo "$SCAN_VULNS" \
+    | jq -r '.vulnerabilities[] | [.affects_url, (.severity|tostring), .confidence, .vt_name] | @tsv' \
+    | sort -t$'\t' -k2,2nr \
+    | while IFS=$'\t' read -r url sev conf name; do
+        printf "%-65s %-16s  %-12s %-50s\n" "$url" "$(sev_txt "$sev")" "$conf" "$name"
+      done
+
+  [[ -n $OUTPUT_FILE ]] && export_vulns_to_file
 }
 
-display_vulnerabilities(){
-    echo
-    echo "Scan Vulnerabilities"
-    echo "===================="
-    echo
+export_vulns_to_file() {
+  local file="$OUTPUT_FILE"; [[ $file != *.txt ]] && file="${file}.txt"
+  printf "%-65s %-16s  %-12s %-50s\n" "Affected URL" "Severity" "Confidence" "Vulnerability Name" > "$file"
 
-    # Define colors
-    GREEN='\033[0;32m'
-    NC='\033[0m' # No color
-
-    # Table header
-    printf "${GREEN}%-40s %-12s %-12s %-50s${NC}\n" "Affected URL" "Severity" "Confidence" "Vulnerability Name"
-
-    # Function to convert numerical severity to text based on Acunetix documentation
-    convert_criticality() {
-        case $1 in
-            0) echo "informational" ;;
-            1) echo "low" ;;
-            2) echo "medium" ;;
-            3) echo "high" ;;
-            4) echo "critical" ;;
-            *) echo "unknown" ;;
-        esac
-    }
-
-    # Process vulnerabilities and display them in a table
-    echo "$MyScanVulnerabilities" | jq -r '.vulnerabilities[] | [.vt_name, (.severity|tostring), .confidence, .affects_url] | @tsv' | while IFS=$'\t' read -r name severity confidence url; do
-        severity_text=$(convert_criticality $severity)
-        echo "$severity,$url,$severity_text,$confidence,$name"
-    done | sort -t',' -k1,1nr | awk -F',' '{printf "%-40s %-12s %-12s %-50s\n", $2, $3, $4, $5}'
+  echo "$SCAN_VULNS" \
+    | jq -r '.vulnerabilities[] | [.affects_url, (.severity|tostring), .confidence, .vt_name] | @tsv' \
+    | sort -t$'\t' -k2,2nr \
+    | while IFS=$'\t' read -r url sev conf name; do
+        printf "%-65s %-16s  %-12s %-50s\n" "$url" "$(sev_txt "$sev")" "$conf" "$name"
+      done >> "$file"
+  echo "[*] Findings exported to $file"
 }
 
-# Display the banner
-display_banner
+collect_and_print_vulns() {
+  for id in "${SCAN_IDS[@]}"; do
+      res=$(curl -sSk "$AX_URL/scans/$id/results" -H "X-Auth: $AX_KEY" | jq -r '.results[0].result_id')
+      [[ -n $res && $res != null ]] && \
+      SCAN_VULNS+=$(curl -sSk "$AX_URL/scans/$id/results/$res/vulnerabilities" -H "X-Auth: $AX_KEY")
+  done
+  print_vulns_table
+}
 
-# Handle user interruption (CTRL + C)
-trap abort_scans INT
+#####################################
+# Main                               #
+#####################################
+banner
+trap abort_handler INT
 
-# Process command-line arguments manually
-for arg in "$@"; do
-  case $arg in
-    -d)
-      shift
-      # Concatenate all remaining arguments into a single string
-      domains_input="$*"
-      break
-      ;;
-    -h)
-      usage
-      ;;
-    *)
-      ;;
+# ── 1. CLI parsing ────────────────────────────────────────────────
+DOMAINS_RAW=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d) shift; while [[ $# -gt 0 && "$1" != -* ]]; do DOMAINS_RAW+="$1 "; shift; done ;;
+    -t) shift; SPEED_OPT="$1"; shift ;;
+    -c) DO_CLEANUP=1; shift ;;
+    -o) shift; OUTPUT_FILE="$1"; shift ;;
+    -h) usage ;;
+     *) shift ;;
   esac
 done
+[[ -z "$DOMAINS_RAW" ]] && usage
+DOMAINS=$(echo "$DOMAINS_RAW" | tr -d ' ' | sed 's/^,*//;s/,*$//;s/,,*/,/g')
 
-# Check if domains were provided
-if [ -z "$domains_input" ]; then
-  usage
-fi
+case "$SPEED_OPT" in
+  1) SCAN_SPEED="sequential";;
+  2) SCAN_SPEED="slow";;
+  3) SCAN_SPEED="moderate";;
+  4) SCAN_SPEED="fast";;
+  *) echo "Invalid value for -t (use 1-4)"; exit 1;;
+esac
 
-# Remove spaces before and after commas
-formatted_domains=$(echo "$domains_input" | sed 's/ *, */,/g')
+[[ -n $OUTPUT_FILE ]] && echo "[*] Export file name     : $OUTPUT_FILE"
+echo "[*] Domains to scan      : $DOMAINS"
+echo "[*] Selected scan speed  : $SCAN_SPEED"
+echo "[*] Auto-cleanup enabled : $( ((DO_CLEANUP)) && echo yes || echo no )"
 
-# Split comma-separated domains and store them in an array
-IFS=',' read -ra domains <<< "$formatted_domains"
+# ── 2. Sub-domain enumeration ────────────────────────────────────
+IFS=',' read -ra ROOTS <<< "$DOMAINS"
+COMBINED=()
 
-# Combine user-provided domains with subdomains
-combined_domains=()
+for root in "${ROOTS[@]}"; do
+  [[ $(command -v sublist3r) ]] && s1=$(sublist3r -d "$root" -n --threads 1 2>/dev/null | awk -v d="$root" 'tolower($0)~("[a-z0-9._-]+\\."d"$"){print $1}')
+  [[ $(command -v subfinder)  ]] && s2=$(subfinder  -d "$root" -silent 2>/dev/null | awk -v d="$root" 'tolower($0)~("[a-z0-9._-]+\\."d"$")')
+  uniq=$(echo -e "$root\n$s1\n$s2" | sort -u)
+  COMBINED+=($uniq)
+  for s in $uniq; do SUB_ROOT["$s"]="$root"; done
+  echo "Sub-domains found for $root:"; echo "$uniq"
+done
+COMBINED=($(printf "%s\n" "${COMBINED[@]}" | sort -u))
 
-# Iterate over each domain to enumerate subdomains and create scan targets
-for domain in "${domains[@]}"; do
-  # Use sublist3r to enumerate subdomains and store only the subdomain names in a variable
-  subdomains_sublist=$(sublist3r -d $domain -n | awk '/[a-zA-Z0-9]+\.'$domain'/{print $1}' | sort -u)
-
-  # Use subfinder to enumerate subdomains and store only the subdomain names in a variable, suppressing stderr output
-  subdomains_subfinder=$(subfinder -d $domain -silent 2>/dev/null | grep -oP '([a-zA-Z0-9._-]+\.)+[a-zA-Z]{2,}' | sort -u)
-
-  # Combine and store the unique subdomains from both tools, including the original domain
-  unique_subdomains=$(echo -e "$domain\n$subdomains_subfinder\n$subdomains_sublist" | sort -u | uniq)
-  
-  # Add unique subdomains to combined_domains
-  combined_domains+=($unique_subdomains)
-
-  # Print the found subdomains to the screen
-  echo "Subdomains found for $domain:"
-  echo "$unique_subdomains"
+# ── 3. Target creation & speed patch ─────────────────────────────
+for sub in "${COMBINED[@]}"; do
+  root=${SUB_ROOT["$sub"]}
+  tid=$(curl -sSk -X POST "$AX_URL/targets" \
+        -H "Content-Type: application/json" -H "X-Auth: $AX_KEY" \
+        --data "{\"address\":\"$sub\",\"description\":\"Subdomain of $root\",\"type\":\"default\",\"criticality\":10}" \
+        | jq -r '.target_id')
+  TARGET_IDS+=("$tid")
+  curl -sSk -X PATCH "$AX_URL/targets/$tid/configuration" -H "Content-Type: application/json" -H "X-Auth: $AX_KEY" --data "{\"scan_speed\":\"$SCAN_SPEED\"}" >/dev/null
 done
 
-# Remove duplicates from combined_domains array
-combined_domains=($(echo "${combined_domains[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
-
-# Add subdomains as scan targets
-for subdomain in "${combined_domains[@]}"; do
-  MyTargetID=$(curl -sS -k -X POST "$MyAXURL/targets" -H "Content-Type: application/json" -H "X-Auth: $MyAPIKEY" --data "{\"address\":\"$subdomain\",\"description\":\"Subdomain of $subdomain\",\"type\":\"default\",\"criticality\":10}" | jq -r '.target_id')
-  MyTargetIDs+=("$MyTargetID")
+# ── 4. Launch scans ──────────────────────────────────────────────
+for tid in "${TARGET_IDS[@]}"; do
+  sid=$(curl -sSk -X POST "$AX_URL/scans" \
+        -H "Content-Type: application/json" -H "X-Auth: $AX_KEY" \
+        --data "{\"profile_id\":\"$FULL_SCAN_PROFILE\",\"incremental\":false,\"schedule\":{\"disable\":false,\"start_date\":null,\"time_sensitive\":false},\"user_authorized_to_scan\":\"yes\",\"target_id\":\"$tid\"}" \
+        | jq -r '.scan_id')
+  SCAN_IDS+=("$sid")
 done
 
-# Start scans for each scan target
-for id in "${MyTargetIDs[@]}"; do
-  MyScanID=$(curl -sS -k -X POST "$MyAXURL/scans" -H "Content-Type: application/json" -H "X-Auth: $MyAPIKEY" --data "{\"profile_id\":\"$FullScanProfileID\",\"incremental\":false,\"schedule\":{\"disable\":false,\"start_date\":null,\"time_sensitive\":false},\"user_authorized_to_scan\":\"yes\",\"target_id\":\"$id\"}" | jq -r '.scan_id')
-  MyScanIDs+=("$MyScanID")
-done
-
-# Check scan status and wait for completion
-for id in "${MyScanIDs[@]}"; do
+# ── 5. Poll scan status ─────────────────────────────────────────
+for sid in "${SCAN_IDS[@]}"; do
   while true; do
-    MyScanStatus=$(curl -sS -k -X GET "$MyAXURL/scans/$id" -H "Accept: application/json" -H "X-Auth: $MyAPIKEY")
-
-    scan_status=$(echo "$MyScanStatus" | jq -r '.current_session.status')
-    if [[ "$scan_status" == "processing" ]]; then
-      echo "Scan status: Processing - waiting 30 seconds"
-    elif [[ "$scan_status" == "scheduled" ]]; then
-      echo "Scan status: Scheduled - waiting 30 seconds"
-    elif [[ "$scan_status" == "completed" ]]; then
-      echo "Scan status: Completed"
-      # Get scan result ID
-      MyScanResultID=$(echo "$MyScanStatus" | jq -r '.current_session_id')
-      # Exit the loop
-      break
-    elif [[ "$scan_status" == "queued" ]]; then
-      echo "Scan status: Queued - waiting 30 seconds"
-    elif [[ "$scan_status" == "failed" ]]; then
-      echo "Scan status: Failed for scan ID: $id"
-      # Log and continue with the next scan
-      break
-    elif [[ "$scan_status" == "aborted" ]]; then
-      echo "Scan status: Aborted for scan ID: $id"
-      # Log and continue with the next scan
-      break
-    else
-      echo "Invalid scan status for scan ID: $id. Response: $MyScanStatus"
-      # Log and continue with the next scan
-      break
-    fi
+    status=$(curl -sSk "$AX_URL/scans/$sid" -H "X-Auth: $AX_KEY" | jq -r '.current_session.status')
+    case $status in
+      processing) echo "Scan status: Processing  – waiting 30 s" ;;
+      scheduled)  echo "Scan status: Scheduled   – waiting 30 s" ;;
+      queued)     echo "Scan status: Queued      – waiting 30 s" ;;
+      completed)  echo "Scan status: Completed";  break ;;
+      failed)     echo "Scan status: Failed";     break ;;
+      aborted)    echo "Scan status: Aborted";    break ;;
+      *)          echo "Scan status: Unknown";    break ;;
+    esac
     sleep 30
   done
 done
 
-# Final cleanup
-cleanup
-
+cleanup   # delete scans/targets only if -c flag present
